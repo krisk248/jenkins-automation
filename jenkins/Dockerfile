@@ -54,12 +54,12 @@ RUN pip3 install --break-system-packages --no-cache-dir semgrep \
     && semgrep --version
 
 # ============================================================================
-# TRIVY - Vulnerability Scanner
+# TRIVY - Vulnerability Scanner (Standalone Binary)
 # ============================================================================
-RUN wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key | apt-key add - \
-    && echo "deb https://aquasecurity.github.io/trivy-repo/deb $(lsb_release -sc) main" | tee -a /etc/apt/sources.list.d/trivy.list \
-    && apt-get update \
-    && apt-get install -y trivy \
+RUN wget https://github.com/aquasecurity/trivy/releases/download/v0.58.2/trivy_0.58.2_Linux-64bit.tar.gz \
+    && tar -xzf trivy_0.58.2_Linux-64bit.tar.gz -C /usr/local/bin/ \
+    && chmod +x /usr/local/bin/trivy \
+    && rm trivy_0.58.2_Linux-64bit.tar.gz \
     && trivy --version
 
 # ============================================================================
@@ -71,11 +71,7 @@ RUN wget https://github.com/trufflesecurity/trufflehog/releases/download/v3.63.7
     && rm trufflehog_3.63.7_linux_amd64.tar.gz \
     && trufflehog --version
 
-# ============================================================================
-# JQ - JSON Processor (for parsing scan results)
-# ============================================================================
-RUN apt-get update && apt-get install -y jq \
-    && jq --version
+# JQ is already installed in system packages above
 
 # ============================================================================
 # COPY CUSTOM SCRIPTS AND TEMPLATES
