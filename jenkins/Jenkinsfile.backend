@@ -2,18 +2,17 @@
 // ADXSIP BACKEND DEPLOYMENT PIPELINE
 // ============================================================================
 // Architecture:
-// - Jenkins in Docker (security tools, Python, SonarQube)
-// - Code on HOST at /tts/ttsbuild/ADXSIP/ADX-SIP/
-// - Build tools on HOST (Maven, Java)
-// - Jenkins executes commands on HOST via SSH
-// - Jenkins scans mounted host folders
+// - Jenkins in Docker with ALL build tools (SDKMAN, NVM, security tools)
+// - Code MOUNTED from host at /tts/ttsbuild/ADXSIP/ADX-SIP/
+// - Builds run INSIDE Docker (no SSH needed!)
+// - Output written to MOUNTED /tts/outputttsbuild/
 //
 // Flow:
-// 1. Git pull on host
-// 2. Security scan (Semgrep, Trivy, TruffleHog) - scan mounted folder
+// 1. Git pull (on mounted folder)
+// 2. Security scan (Semgrep, Trivy, TruffleHog)
 // 3. SonarQube analysis
 // 4. Quality gate
-// 5. Maven build on host
+// 5. Maven build (inside Docker)
 // 6. Copy artifacts to output folder
 // 7. Windows agent deploys
 // ============================================================================
@@ -28,18 +27,13 @@ pipeline {
         PROJECT_NAME = 'ADXSIP Backend'
         COMPONENT_NAME = 'ADXSIP'
 
-        // GitHub repository (for reference only, git pull happens on host)
+        // GitHub repository
         GITHUB_URL = 'https://github.com/TTS-FZLLC/adxsip-backend'
         GITHUB_BRANCH = 'main'
 
-        // HOST paths (where code actually lives)
-        HOST_USER = 'ttsbuild'
-        HOST_CODE_PATH = '/tts/ttsbuild/ADXSIP/ADX-SIP'
-        HOST_OUTPUT_PATH = '/tts/outputttsbuild/ADXSIP'
-
         // MOUNTED paths (inside Jenkins container)
-        MOUNTED_CODE_PATH = '/tts/ttsbuild/ADXSIP/ADX-SIP'
-        MOUNTED_OUTPUT_PATH = '/tts/outputttsbuild/ADXSIP'
+        CODE_PATH = '/tts/ttsbuild/ADXSIP/ADX-SIP'
+        OUTPUT_PATH = '/tts/outputttsbuild/ADXSIP'
 
         // Teams webhook URL
         TEAMS_WEBHOOK = 'YOUR_TEAMS_WEBHOOK_URL_HERE'
@@ -49,6 +43,9 @@ pipeline {
 
         // Deployment script on Windows server
         DEPLOY_SCRIPT = 'C:\\TTS\\REManagement\\UAE\\SIP-NEW\\jenkins\\deploy.py'
+
+        // Java version for this project (8 or 17)
+        JAVA_VERSION = '17'
 
         // ====================================================================
         // AUTO-GENERATED VALUES
@@ -98,18 +95,15 @@ pipeline {
         }
 
         // ====================================================================
-        // STAGE 2: UPDATE CODE ON HOST
+        // STAGE 2: UPDATE CODE (GIT PULL)
         // ====================================================================
         stage('Update Code') {
             steps {
-                echo "Updating code on host via SSH..."
-                sshagent(['localhost-ssh']) {
-                    sh """
-                        ssh -o StrictHostKeyChecking=no ${HOST_USER}@host.docker.internal \
-                        "cd ${HOST_CODE_PATH} && git pull origin ${GITHUB_BRANCH}"
-                    """
+                echo "Updating code from GitHub..."
+                dir("${CODE_PATH}") {
+                    sh "git pull origin ${GITHUB_BRANCH}"
                 }
-                echo "✅ Code updated on host"
+                echo "✅ Code updated"
             }
         }
 
@@ -118,11 +112,10 @@ pipeline {
         // ====================================================================
         stage('Security Scans') {
             steps {
-                echo "Running security scans on mounted host folder..."
-                sh """
-                    cd ${MOUNTED_CODE_PATH}
-                    /usr/local/bin/security-scripts/security_scan.sh
-                """
+                echo "Running security scans..."
+                dir("${CODE_PATH}") {
+                    sh "/usr/local/bin/security-scripts/security_scan.sh"
+                }
                 echo "✅ Security scans complete"
             }
         }
@@ -133,12 +126,11 @@ pipeline {
         stage('Generate Report') {
             steps {
                 echo "Generating PDF security report..."
-                sh """
-                    cd ${MOUNTED_CODE_PATH}
-                    python3 /usr/local/bin/security-scripts/generate_report.py
-                """
+                dir("${CODE_PATH}") {
+                    sh "python3 /usr/local/bin/security-scripts/generate_report.py"
+                }
 
-                archiveArtifacts artifacts: 'security-report.pdf, summary.json',
+                archiveArtifacts artifacts: "${CODE_PATH}/security-report.pdf, ${CODE_PATH}/summary.json",
                                allowEmptyArchive: true
 
                 echo "✅ Security report generated"
@@ -151,7 +143,7 @@ pipeline {
         stage('Notify Security Scan') {
             steps {
                 script {
-                    def summary = readJSON file: "${MOUNTED_CODE_PATH}/summary.json"
+                    def summary = readJSON file: "${CODE_PATH}/summary.json"
 
                     def scanColor = summary.risk_level == 'CRITICAL' ? 'ff0000' :
                                    summary.risk_level == 'HIGH' ? 'ff8800' :
@@ -203,11 +195,12 @@ pipeline {
         // ====================================================================
         stage('SonarQube Analysis') {
             steps {
-                echo "Running SonarQube analysis on host..."
-                sshagent(['localhost-ssh']) {
+                echo "Running SonarQube analysis..."
+                dir("${CODE_PATH}") {
                     sh """
-                        ssh -o StrictHostKeyChecking=no ${HOST_USER}@host.docker.internal \
-                        "cd ${HOST_CODE_PATH} && mvn sonar:sonar"
+                        source /var/jenkins_home/.sdkman/bin/sdkman-init.sh
+                        sdk use java ${JAVA_VERSION}.0.13-tem
+                        mvn sonar:sonar
                     """
                 }
                 echo "✅ SonarQube analysis complete"
@@ -265,15 +258,16 @@ pipeline {
         }
 
         // ====================================================================
-        // STAGE 8: BUILD ON HOST
+        // STAGE 8: BUILD WITH MAVEN
         // ====================================================================
         stage('Build') {
             steps {
-                echo "Building with Maven on host..."
-                sshagent(['localhost-ssh']) {
+                echo "Building with Maven (Java ${JAVA_VERSION})..."
+                dir("${CODE_PATH}") {
                     sh """
-                        ssh -o StrictHostKeyChecking=no ${HOST_USER}@host.docker.internal \
-                        "cd ${HOST_CODE_PATH} && mvn clean install -DskipTests"
+                        source /var/jenkins_home/.sdkman/bin/sdkman-init.sh
+                        sdk use java ${JAVA_VERSION}.0.13-tem
+                        mvn clean install -DskipTests
                     """
                 }
                 echo "✅ Build complete"
@@ -287,10 +281,10 @@ pipeline {
             steps {
                 echo "Copying WAR file to output folder..."
                 sh """
-                    mkdir -p ${MOUNTED_OUTPUT_PATH}
-                    cp ${MOUNTED_CODE_PATH}/target/*.war ${MOUNTED_OUTPUT_PATH}/${COMPONENT_NAME}_${BUILD_NUMBER}.war
+                    mkdir -p ${OUTPUT_PATH}
+                    cp ${CODE_PATH}/target/*.war ${OUTPUT_PATH}/${COMPONENT_NAME}_${BUILD_NUMBER}.war
                 """
-                echo "✅ WAR file copied to ${MOUNTED_OUTPUT_PATH}/${COMPONENT_NAME}_${BUILD_NUMBER}.war"
+                echo "✅ WAR file copied to ${OUTPUT_PATH}/${COMPONENT_NAME}_${BUILD_NUMBER}.war"
             }
         }
 
@@ -305,7 +299,7 @@ pipeline {
                 bat """
                     python ${DEPLOY_SCRIPT} ^
                         --action deploy-backend ^
-                        --war ${MOUNTED_OUTPUT_PATH}\\${COMPONENT_NAME}_${BUILD_NUMBER}.war ^
+                        --war ${OUTPUT_PATH}\\${COMPONENT_NAME}_${BUILD_NUMBER}.war ^
                         --component ${COMPONENT_NAME}
                 """
 
@@ -333,7 +327,7 @@ pipeline {
         stage('Notify Success') {
             steps {
                 script {
-                    def summary = readJSON file: "${MOUNTED_CODE_PATH}/summary.json"
+                    def summary = readJSON file: "${CODE_PATH}/summary.json"
 
                     // Teams notification
                     def successMessage = [

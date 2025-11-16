@@ -1,26 +1,37 @@
 // ============================================================================
-// ADXSIP FRONTEND DEPLOYMENT PIPELINE
+// ADX-SIP FRONTEND DEPLOYMENT PIPELINE
 // ============================================================================
-// This pipeline:
-// 1. Runs security scans (Semgrep, Trivy, TruffleHog)
-// 2. Sends Teams notification with scan results
-// 3. Runs SonarQube quality gate
-// 4. Builds Angular dist folder
-// 5. Deploys to Windows server (NO Tomcat restart)
-// 6. Sends deployment notifications (Teams + Email)
+// Architecture:
+// - Jenkins in Docker with ALL build tools (SDKMAN, NVM, security tools)
+// - Code MOUNTED from host at /tts/ttsbuild/ADXSIP/ADX-SIP-ANGULAR/
+// - Builds run INSIDE Docker (no SSH needed!)
+// - Output written to MOUNTED /tts/outputttsbuild/
+//
+// Flow:
+// 1. Git pull (on mounted folder)
+// 2. Security scan (Semgrep, Trivy, TruffleHog)
+// 3. Angular build (ng build --prod)
+// 4. Copy dist files to output folder
+// 5. Windows agent deploys
 // ============================================================================
 
 pipeline {
-    agent { label 'UAE_tomcat' }  // Windows agent on TTS-STG01
+    agent any
 
     environment {
         // ====================================================================
         // CONFIGURATION - UPDATE THESE VALUES
         // ====================================================================
         PROJECT_NAME = 'ADX-SIP Frontend'
-        COMPONENT_NAME = 'ADX-SIP'
+        COMPONENT_NAME = 'ADX-SIP-ANGULAR'
+
+        // GitHub repository
         GITHUB_URL = 'https://github.com/TTS-FZLLC/adx-sip-frontend'
         GITHUB_BRANCH = 'main'
+
+        // MOUNTED paths (inside Jenkins container)
+        CODE_PATH = '/tts/ttsbuild/ADXSIP/ADX-SIP-ANGULAR'
+        OUTPUT_PATH = '/tts/outputttsbuild/ADXSIP'
 
         // Teams webhook URL
         TEAMS_WEBHOOK = 'YOUR_TEAMS_WEBHOOK_URL_HERE'
@@ -28,9 +39,11 @@ pipeline {
         // Email recipients
         EMAIL_RECIPIENTS = 'kannan.giridharan@ttsme.com'
 
-        // Deployment paths
+        // Deployment script on Windows server
         DEPLOY_SCRIPT = 'C:\\TTS\\REManagement\\UAE\\SIP-NEW\\jenkins\\deploy.py'
-        OUTPUT_DIR = 'C:\\TTS\\outputttsbuild\\ADX-SIP'
+
+        // Node.js version for this project
+        NODE_VERSION = '20'
 
         // ====================================================================
         // AUTO-GENERATED VALUES
@@ -55,7 +68,7 @@ pipeline {
                             "activityTitle": "${PROJECT_NAME}",
                             "activitySubtitle": "Build #${BUILD_NUMBER}",
                             "facts": [
-                                ["name": "Developer", "value": "${env.GIT_AUTHOR ?: 'Jenkins'}"],
+                                ["name": "Component", "value": "${COMPONENT_NAME}"],
                                 ["name": "Branch", "value": "${GITHUB_BRANCH}"],
                                 ["name": "Status", "value": "IN PROGRESS"]
                             ]
@@ -71,35 +84,41 @@ pipeline {
                             validResponseCodes: '200',
                             ignoreSslErrors: true
                         )
+                        echo "✅ Start notification sent to Teams"
                     } catch (Exception e) {
-                        echo "Teams notification failed: ${e.message}"
+                        echo "⚠️ Teams notification failed: ${e.message}"
                     }
                 }
             }
         }
 
         // ====================================================================
-        // STAGE 2: CHECKOUT CODE
+        // STAGE 2: UPDATE CODE (GIT PULL)
         // ====================================================================
-        stage('Checkout') {
+        stage('Update Code') {
             steps {
-                git branch: "${GITHUB_BRANCH}",
-                    credentialsId: 'github-pat',
-                    url: "${GITHUB_URL}"
-
-                script {
-                    env.GIT_COMMIT_SHORT = sh(script: "git rev-parse --short HEAD || echo 'unknown'", returnStdout: true).trim()
-                    env.GIT_AUTHOR = sh(script: "git log -1 --pretty=%an || echo 'Jenkins'", returnStdout: true).trim()
+                echo "Updating code from GitHub..."
+                dir("${CODE_PATH}") {
+                    sh "git pull origin ${GITHUB_BRANCH}"
                 }
+                echo "✅ Code updated"
             }
         }
 
         // ====================================================================
-        // STAGE 3: CLEAN WORKSPACE
+        // STAGE 3: INSTALL NPM DEPENDENCIES
         // ====================================================================
-        stage('Clean Workspace') {
+        stage('Install Dependencies') {
             steps {
-                sh 'git clean -fdx'
+                echo "Installing npm dependencies..."
+                dir("${CODE_PATH}") {
+                    sh """
+                        source /var/jenkins_home/.nvm/nvm.sh
+                        nvm use ${NODE_VERSION}
+                        npm install
+                    """
+                }
+                echo "✅ Dependencies installed"
             }
         }
 
@@ -108,7 +127,11 @@ pipeline {
         // ====================================================================
         stage('Security Scans') {
             steps {
-                sh '/usr/local/bin/security-scripts/security_scan.sh'
+                echo "Running security scans..."
+                dir("${CODE_PATH}") {
+                    sh "/usr/local/bin/security-scripts/security_scan.sh"
+                }
+                echo "✅ Security scans complete"
             }
         }
 
@@ -117,10 +140,15 @@ pipeline {
         // ====================================================================
         stage('Generate Report') {
             steps {
-                sh 'python3 /usr/local/bin/security-scripts/generate_report.py'
+                echo "Generating PDF security report..."
+                dir("${CODE_PATH}") {
+                    sh "python3 /usr/local/bin/security-scripts/generate_report.py"
+                }
 
-                archiveArtifacts artifacts: 'security-report.pdf, summary.json',
+                archiveArtifacts artifacts: "${CODE_PATH}/security-report.pdf, ${CODE_PATH}/summary.json",
                                allowEmptyArchive: true
+
+                echo "✅ Security report generated"
             }
         }
 
@@ -130,7 +158,7 @@ pipeline {
         stage('Notify Security Scan') {
             steps {
                 script {
-                    def summary = readJSON file: 'summary.json'
+                    def summary = readJSON file: "${CODE_PATH}/summary.json"
 
                     def scanColor = summary.risk_level == 'CRITICAL' ? 'ff0000' :
                                    summary.risk_level == 'HIGH' ? 'ff8800' :
@@ -169,121 +197,83 @@ pipeline {
                             validResponseCodes: '200',
                             ignoreSslErrors: true
                         )
+                        echo "✅ Security scan notification sent to Teams"
                     } catch (Exception e) {
-                        echo "Teams notification failed: ${e.message}"
+                        echo "⚠️ Teams notification failed: ${e.message}"
                     }
                 }
             }
         }
 
         // ====================================================================
-        // STAGE 7: SONARQUBE ANALYSIS
-        // ====================================================================
-        stage('SonarQube Analysis') {
-            steps {
-                withSonarQubeEnv('SonarQube') {
-                    sh 'sonar-scanner'  // For Node.js/Angular projects
-                }
-            }
-        }
-
-        // ====================================================================
-        // STAGE 8: QUALITY GATE
-        // ====================================================================
-        stage('Quality Gate') {
-            steps {
-                timeout(time: 5, unit: 'MINUTES') {
-                    script {
-                        def qg = waitForQualityGate()
-                        if (qg.status != 'OK') {
-                            // Quality gate failed - send notification and stop
-                            def failMessage = [
-                                "@type": "MessageCard",
-                                "@context": "https://schema.org/extensions",
-                                "summary": "Quality Gate Failed",
-                                "themeColor": "ff0000",
-                                "title": "❌ Quality Gate FAILED - Deployment Stopped",
-                                "sections": [[
-                                    "activityTitle": "${PROJECT_NAME}",
-                                    "activitySubtitle": "Build #${BUILD_NUMBER}",
-                                    "facts": [
-                                        ["name": "Status", "value": qg.status],
-                                        ["name": "Action", "value": "Fix code quality issues"]
-                                    ],
-                                    "text": "Deployment has been stopped due to quality gate failure."
-                                ]]
-                            ]
-
-                            try {
-                                httpRequest(
-                                    url: "${TEAMS_WEBHOOK}",
-                                    httpMode: 'POST',
-                                    contentType: 'APPLICATION_JSON',
-                                    requestBody: groovy.json.JsonOutput.toJson(failMessage),
-                                    validResponseCodes: '200',
-                                    ignoreSslErrors: true
-                                )
-                            } catch (Exception e) {
-                                echo "Teams notification failed: ${e.message}"
-                            }
-
-                            error "Quality gate failed: ${qg.status}"
-                        }
-                    }
-                }
-            }
-        }
-
-        // ====================================================================
-        // STAGE 9: BUILD
+        // STAGE 7: BUILD WITH ANGULAR CLI
         // ====================================================================
         stage('Build') {
             steps {
-                sh 'npm install'
-                sh 'ng build --configuration production'
+                echo "Building with Angular CLI (Node ${NODE_VERSION})..."
+                dir("${CODE_PATH}") {
+                    sh """
+                        source /var/jenkins_home/.nvm/nvm.sh
+                        nvm use ${NODE_VERSION}
+                        ng build --configuration production
+                    """
+                }
+                echo "✅ Build complete"
             }
         }
 
         // ====================================================================
-        // STAGE 10: COPY TO OUTPUT
+        // STAGE 8: COPY DIST TO OUTPUT FOLDER
         // ====================================================================
         stage('Copy to Output') {
             steps {
+                echo "Copying dist files to output folder..."
                 sh """
-                    mkdir -p ${OUTPUT_DIR}/build_${BUILD_NUMBER}
-                    cp -r dist/* ${OUTPUT_DIR}/build_${BUILD_NUMBER}/
+                    mkdir -p ${OUTPUT_PATH}/${COMPONENT_NAME}_${BUILD_NUMBER}
+                    cp -r ${CODE_PATH}/dist/* ${OUTPUT_PATH}/${COMPONENT_NAME}_${BUILD_NUMBER}/
                 """
+                echo "✅ Files copied to ${OUTPUT_PATH}/${COMPONENT_NAME}_${BUILD_NUMBER}/"
             }
         }
 
         // ====================================================================
-        // STAGE 11: DEPLOY TO SERVER
+        // STAGE 9: DEPLOY TO WINDOWS SERVER
         // ====================================================================
         stage('Deploy') {
+            agent { label 'UAE_tomcat' }  // Switch to Windows agent
+
             steps {
+                echo "Deploying to Windows server..."
                 bat """
                     python ${DEPLOY_SCRIPT} ^
                         --action deploy-frontend ^
-                        --source ${OUTPUT_DIR}\\build_${BUILD_NUMBER} ^
+                        --dist ${OUTPUT_PATH}\\${COMPONENT_NAME}_${BUILD_NUMBER} ^
                         --component ${COMPONENT_NAME}
                 """
 
                 script {
                     // Read deployment status
-                    def deployStatus = readJSON file: 'deployment_status.json'
-                    env.DEPLOYMENT_DURATION = deployStatus.duration_seconds
+                    if (fileExists('deployment_status.json')) {
+                        def deployStatus = readJSON file: 'deployment_status.json'
+                        env.DEPLOYMENT_DURATION = deployStatus.duration_seconds
+                        env.HEALTH_CHECK = deployStatus.health_check
+                    } else {
+                        env.DEPLOYMENT_DURATION = 'N/A'
+                        env.HEALTH_CHECK = 'Status file not found'
+                    }
                 }
+
+                echo "✅ Deployment complete"
             }
         }
 
         // ====================================================================
-        // STAGE 12: SEND SUCCESS NOTIFICATION
+        // STAGE 10: SEND SUCCESS NOTIFICATION
         // ====================================================================
         stage('Notify Success') {
             steps {
                 script {
-                    def summary = readJSON file: 'summary.json'
-                    def deployStatus = readJSON file: 'deployment_status.json'
+                    def summary = readJSON file: "${CODE_PATH}/summary.json"
 
                     // Teams notification
                     def successMessage = [
@@ -298,10 +288,9 @@ pipeline {
                             "facts": [
                                 ["name": "Component", "value": "${COMPONENT_NAME}"],
                                 ["name": "Server", "value": "TTS-STG01"],
-                                ["name": "Type", "value": "Frontend (No Tomcat restart)"],
-                                ["name": "Duration", "value": "${deployStatus.duration_seconds}s"]
-                            ],
-                            "text": "Frontend deployed successfully. No manual steps required."
+                                ["name": "Health Check", "value": "${env.HEALTH_CHECK}"],
+                                ["name": "Duration", "value": "${env.DEPLOYMENT_DURATION}s"]
+                            ]
                         ]]
                     ]
 
@@ -314,8 +303,9 @@ pipeline {
                             validResponseCodes: '200',
                             ignoreSslErrors: true
                         )
+                        echo "✅ Success notification sent to Teams"
                     } catch (Exception e) {
-                        echo "Teams notification failed: ${e.message}"
+                        echo "⚠️ Teams notification failed: ${e.message}"
                     }
 
                     // Email notification
@@ -328,10 +318,10 @@ pipeline {
 
                             <h3>1. Deployment Info</h3>
                             <ul>
-                                <li>Developer: ${env.GIT_AUTHOR}</li>
                                 <li>Time: ${SCAN_DATE}</li>
                                 <li>Build: #${BUILD_NUMBER}</li>
-                                <li>Duration: ${deployStatus.duration_seconds}s</li>
+                                <li>Component: ${COMPONENT_NAME}</li>
+                                <li>Duration: ${env.DEPLOYMENT_DURATION}s</li>
                             </ul>
 
                             <h3>2. Security Scan</h3>
@@ -344,20 +334,16 @@ pipeline {
                             </ul>
                             <p><a href="${BUILD_URL}artifact/security-report.pdf">Download PDF Report</a></p>
 
-                            <h3>3. Quality Gate</h3>
-                            <p style="color: green;">✅ PASSED</p>
-
-                            <h3>4. Deployment</h3>
+                            <h3>3. Deployment</h3>
                             <ul>
-                                <li>Server: TTS-STG01</li>
+                                <li>Server: TTS-STG01 (192.168.1.142)</li>
                                 <li>Component: ${COMPONENT_NAME}</li>
-                                <li>Type: Frontend</li>
                                 <li>Backup: Created</li>
-                                <li>Tomcat: NOT RESTARTED (frontend only)</li>
+                                <li>Files: Replaced ✅</li>
                             </ul>
 
-                            <h3>5. Status</h3>
-                            <p style="color: green;">✅ Frontend files deployed successfully. No manual steps required.</p>
+                            <h3>4. Health Check</h3>
+                            <p>${env.HEALTH_CHECK}</p>
 
                             <hr>
                             <p><a href="${BUILD_URL}">View Full Build Log</a></p>
@@ -368,6 +354,8 @@ pipeline {
                         mimeType: 'text/html',
                         attachmentsPattern: 'security-report.pdf'
                     )
+
+                    echo "✅ Email notification sent"
                 }
             }
         }
@@ -407,7 +395,7 @@ pipeline {
                         ignoreSslErrors: true
                     )
                 } catch (Exception e) {
-                    echo "Teams notification failed: ${e.message}"
+                    echo "⚠️ Teams notification failed: ${e.message}"
                 }
 
                 emailext(

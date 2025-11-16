@@ -1,18 +1,21 @@
 # ============================================================================
-# JENKINS DOCKERFILE - Lightweight with Security Tools Only
+# JENKINS DOCKERFILE - Complete Build Environment
 # ============================================================================
-# This Jenkins image is LIGHTWEIGHT and contains ONLY:
+# This Jenkins image contains EVERYTHING needed for builds:
 # - Security scanning tools: Semgrep, Trivy, TruffleHog
 # - Python 3 with PDF generation libraries
-# - SSH client for executing commands on host
+# - SDKMAN: Java 8, Java 17, Maven
+# - NVM: Node.js v20
+# - Angular CLI
 #
-# Build tools (Node.js, Maven, Java) are NOT included.
-# They are used from the HOST system via SSH.
+# No SSH needed - builds run directly inside Docker!
+# Code is mounted from host at /tts/ttsbuild/
+# Output goes to /tts/outputttsbuild/
 # ============================================================================
 
 FROM jenkins/jenkins:lts
 
-# Switch to root for installations
+# Switch to root for system installations
 USER root
 
 # ============================================================================
@@ -23,8 +26,9 @@ RUN apt-get update && apt-get install -y \
     wget \
     git \
     vim \
-    openssh-client \
     jq \
+    unzip \
+    zip \
     apt-transport-https \
     ca-certificates \
     gnupg \
@@ -45,7 +49,8 @@ RUN apt-get update && apt-get install -y \
         reportlab \
         Pillow \
         requests \
-    && python3 --version
+    && python3 --version \
+    && rm -rf /var/lib/apt/lists/*
 
 # ============================================================================
 # SEMGREP - Static Application Security Testing (SAST)
@@ -71,8 +76,6 @@ RUN wget https://github.com/trufflesecurity/trufflehog/releases/download/v3.63.7
     && rm trufflehog_3.63.7_linux_amd64.tar.gz \
     && trufflehog --version
 
-# JQ is already installed in system packages above
-
 # ============================================================================
 # COPY CUSTOM SCRIPTS AND TEMPLATES
 # ============================================================================
@@ -88,25 +91,111 @@ RUN chmod +x /usr/local/bin/security-scripts/generate_report.py
 COPY templates/email_template.html /usr/local/bin/security-templates/email_template.html
 
 # ============================================================================
+# SWITCH TO JENKINS USER FOR USER-LEVEL INSTALLATIONS
+# ============================================================================
+USER jenkins
+
+# ============================================================================
+# SDKMAN - Java & Maven Version Manager
+# ============================================================================
+# Install SDKMAN
+RUN curl -s "https://get.sdkman.io" | bash
+
+# Source SDKMAN and install Java 8, Java 17, and Maven
+RUN bash -c "source /var/jenkins_home/.sdkman/bin/sdkman-init.sh && \
+    sdk install java 8.0.432-tem && \
+    sdk install java 17.0.13-tem && \
+    sdk install maven 3.9.9 && \
+    sdk default java 17.0.13-tem && \
+    sdk default maven 3.9.9"
+
+# Add SDKMAN to PATH
+ENV SDKMAN_DIR="/var/jenkins_home/.sdkman"
+ENV PATH="${SDKMAN_DIR}/candidates/java/current/bin:${SDKMAN_DIR}/candidates/maven/current/bin:${PATH}"
+ENV JAVA_HOME="${SDKMAN_DIR}/candidates/java/current"
+ENV MAVEN_HOME="${SDKMAN_DIR}/candidates/maven/current"
+
+# ============================================================================
+# NVM - Node.js Version Manager
+# ============================================================================
+# Install NVM
+ENV NVM_DIR="/var/jenkins_home/.nvm"
+RUN curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.1/install.sh | bash
+
+# Install Node.js v20 (LTS) and set as default
+RUN bash -c "source $NVM_DIR/nvm.sh && \
+    nvm install 20 && \
+    nvm alias default 20 && \
+    nvm use default"
+
+# Add Node.js to PATH
+ENV NODE_VERSION=20
+ENV PATH="${NVM_DIR}/versions/node/v${NODE_VERSION}.18.0/bin:${PATH}"
+
+# ============================================================================
+# ANGULAR CLI - Latest Version
+# ============================================================================
+RUN bash -c "source $NVM_DIR/nvm.sh && \
+    nvm use 20 && \
+    npm install -g @angular/cli@latest"
+
+# ============================================================================
 # CLEANUP
 # ============================================================================
+USER root
 RUN apt-get clean && rm -rf /var/lib/apt/lists/*
 
 # Switch back to Jenkins user
 USER jenkins
 
 # ============================================================================
+# CREATE HELPER SCRIPT TO SWITCH JAVA VERSIONS
+# ============================================================================
+RUN echo '#!/bin/bash\n\
+# Helper script to switch Java versions\n\
+# Usage: switch-java 8 or switch-java 17\n\
+source /var/jenkins_home/.sdkman/bin/sdkman-init.sh\n\
+if [ "$1" = "8" ]; then\n\
+    sdk use java 8.0.432-tem\n\
+elif [ "$1" = "17" ]; then\n\
+    sdk use java 17.0.13-tem\n\
+else\n\
+    echo "Usage: switch-java [8|17]"\n\
+    exit 1\n\
+fi\n\
+java -version' > /var/jenkins_home/switch-java.sh && \
+chmod +x /var/jenkins_home/switch-java.sh
+
+# ============================================================================
 # VERIFY INSTALLATIONS
 # ============================================================================
-RUN echo "=== Security Tools ===" \
-    && semgrep --version \
-    && trivy --version \
-    && trufflehog --version \
-    && echo "=== Python ===" \
-    && python3 --version \
-    && echo "=== SSH Client ===" \
-    && ssh -V \
-    && echo "=== All tools installed successfully ===" \
-    && echo "" \
-    && echo "NOTE: Build tools (Node.js, Maven, Java) are NOT installed." \
-    && echo "      They will be used from the HOST system via SSH."
+RUN echo "=== SECURITY TOOLS ===" && \
+    semgrep --version && \
+    trivy --version && \
+    trufflehog --version && \
+    echo "" && \
+    echo "=== PYTHON ===" && \
+    python3 --version && \
+    python3 -c "import reportlab; import PIL; import requests; print('Python libraries OK')" && \
+    echo "" && \
+    echo "=== BUILD TOOLS ===" && \
+    bash -c "source /var/jenkins_home/.sdkman/bin/sdkman-init.sh && java -version" && \
+    bash -c "source /var/jenkins_home/.sdkman/bin/sdkman-init.sh && mvn -version" && \
+    bash -c "source /var/jenkins_home/.nvm/nvm.sh && node --version" && \
+    bash -c "source /var/jenkins_home/.nvm/nvm.sh && npm --version" && \
+    bash -c "source /var/jenkins_home/.nvm/nvm.sh && ng version" && \
+    echo "" && \
+    echo "=== ALL TOOLS INSTALLED SUCCESSFULLY ===" && \
+    echo "" && \
+    echo "JAVA VERSIONS AVAILABLE:" && \
+    bash -c "source /var/jenkins_home/.sdkman/bin/sdkman-init.sh && sdk list java | grep installed" && \
+    echo "" && \
+    echo "SWITCH JAVA: source /var/jenkins_home/switch-java.sh [8|17]"
+
+# ============================================================================
+# WORKSPACE
+# ============================================================================
+WORKDIR /var/jenkins_home
+
+# Expose ports
+EXPOSE 8080 50001
