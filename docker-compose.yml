@@ -1,0 +1,79 @@
+services:
+  # ============================================================================
+  # JENKINS - CI/CD Server
+  # ============================================================================
+  jenkins:
+    build:
+      context: ./jenkins
+      dockerfile: Dockerfile
+    container_name: jenkins-master
+    restart: unless-stopped
+    privileged: true
+    user: root
+    ports:
+      - "7080:8080"      # Jenkins Web UI
+      - "50001:50001"    # Jenkins Agent Port
+    volumes:
+      - jenkins_home:/var/jenkins_home
+      - /tts/ttsbuild:/tts/ttsbuild
+      - /tts/outputttsbuild:/tts/outputttsbuild
+    environment:
+      - JENKINS_OPTS=--httpPort=8080
+      - JENKINS_SLAVE_AGENT_PORT=50001
+    networks:
+      - devops-net
+
+  # ============================================================================
+  # SONARQUBE - Code Quality & Security Analysis
+  # ============================================================================
+  sonarqube:
+    image: sonarqube:lts-community
+    container_name: sonarqube
+    restart: unless-stopped
+    ports:
+      - "9000:9000"      # SonarQube Web UI
+    environment:
+      - SONAR_ES_BOOTSTRAP_CHECKS_DISABLE=true
+      - SONAR_JDBC_URL=jdbc:postgresql://sonarqube-db:5432/sonar
+      - SONAR_JDBC_USERNAME=sonar
+      - SONAR_JDBC_PASSWORD=sonar
+    volumes:
+      - sonarqube_data:/opt/sonarqube/data
+      - sonarqube_extensions:/opt/sonarqube/extensions
+      - sonarqube_logs:/opt/sonarqube/logs
+    networks:
+      - devops-net
+    depends_on:
+      - sonarqube-db
+
+  # ============================================================================
+  # POSTGRESQL - SonarQube Database
+  # ============================================================================
+  sonarqube-db:
+    image: postgres:15
+    container_name: sonarqube-db
+    restart: unless-stopped
+    environment:
+      - POSTGRES_USER=sonar
+      - POSTGRES_PASSWORD=sonar
+      - POSTGRES_DB=sonar
+    volumes:
+      - postgresql_data:/var/lib/postgresql/data
+    networks:
+      - devops-net
+
+volumes:
+  jenkins_home:
+    driver: local
+  sonarqube_data:
+    driver: local
+  sonarqube_extensions:
+    driver: local
+  sonarqube_logs:
+    driver: local
+  postgresql_data:
+    driver: local
+
+networks:
+  devops-net:
+    driver: bridge

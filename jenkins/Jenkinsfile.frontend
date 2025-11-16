@@ -1,0 +1,434 @@
+// ============================================================================
+// ADXSIP FRONTEND DEPLOYMENT PIPELINE
+// ============================================================================
+// This pipeline:
+// 1. Runs security scans (Semgrep, Trivy, TruffleHog)
+// 2. Sends Teams notification with scan results
+// 3. Runs SonarQube quality gate
+// 4. Builds Angular dist folder
+// 5. Deploys to Windows server (NO Tomcat restart)
+// 6. Sends deployment notifications (Teams + Email)
+// ============================================================================
+
+pipeline {
+    agent { label 'UAE_tomcat' }  // Windows agent on TTS-STG01
+
+    environment {
+        // ====================================================================
+        // CONFIGURATION - UPDATE THESE VALUES
+        // ====================================================================
+        PROJECT_NAME = 'ADX-SIP Frontend'
+        COMPONENT_NAME = 'ADX-SIP'
+        GITHUB_URL = 'https://github.com/TTS-FZLLC/adx-sip-frontend'
+        GITHUB_BRANCH = 'main'
+
+        // Teams webhook URL
+        TEAMS_WEBHOOK = 'YOUR_TEAMS_WEBHOOK_URL_HERE'
+
+        // Email recipients
+        EMAIL_RECIPIENTS = 'kannan.giridharan@ttsme.com'
+
+        // Deployment paths
+        DEPLOY_SCRIPT = 'C:\\TTS\\REManagement\\UAE\\SIP-NEW\\jenkins\\deploy.py'
+        OUTPUT_DIR = 'C:\\TTS\\outputttsbuild\\ADX-SIP'
+
+        // ====================================================================
+        // AUTO-GENERATED VALUES
+        // ====================================================================
+        SCAN_DATE = sh(script: "date '+%Y-%m-%d %H:%M:%S'", returnStdout: true).trim()
+    }
+
+    stages {
+        // ====================================================================
+        // STAGE 1: SEND START NOTIFICATION
+        // ====================================================================
+        stage('Notify Start') {
+            steps {
+                script {
+                    def startMessage = [
+                        "@type": "MessageCard",
+                        "@context": "https://schema.org/extensions",
+                        "summary": "Deployment Started",
+                        "themeColor": "0078D7",
+                        "title": "🚀 Deployment Started",
+                        "sections": [[
+                            "activityTitle": "${PROJECT_NAME}",
+                            "activitySubtitle": "Build #${BUILD_NUMBER}",
+                            "facts": [
+                                ["name": "Developer", "value": "${env.GIT_AUTHOR ?: 'Jenkins'}"],
+                                ["name": "Branch", "value": "${GITHUB_BRANCH}"],
+                                ["name": "Status", "value": "IN PROGRESS"]
+                            ]
+                        ]]
+                    ]
+
+                    try {
+                        httpRequest(
+                            url: "${TEAMS_WEBHOOK}",
+                            httpMode: 'POST',
+                            contentType: 'APPLICATION_JSON',
+                            requestBody: groovy.json.JsonOutput.toJson(startMessage),
+                            validResponseCodes: '200',
+                            ignoreSslErrors: true
+                        )
+                    } catch (Exception e) {
+                        echo "Teams notification failed: ${e.message}"
+                    }
+                }
+            }
+        }
+
+        // ====================================================================
+        // STAGE 2: CHECKOUT CODE
+        // ====================================================================
+        stage('Checkout') {
+            steps {
+                git branch: "${GITHUB_BRANCH}",
+                    credentialsId: 'github-pat',
+                    url: "${GITHUB_URL}"
+
+                script {
+                    env.GIT_COMMIT_SHORT = sh(script: "git rev-parse --short HEAD || echo 'unknown'", returnStdout: true).trim()
+                    env.GIT_AUTHOR = sh(script: "git log -1 --pretty=%an || echo 'Jenkins'", returnStdout: true).trim()
+                }
+            }
+        }
+
+        // ====================================================================
+        // STAGE 3: CLEAN WORKSPACE
+        // ====================================================================
+        stage('Clean Workspace') {
+            steps {
+                sh 'git clean -fdx'
+            }
+        }
+
+        // ====================================================================
+        // STAGE 4: SECURITY SCANS
+        // ====================================================================
+        stage('Security Scans') {
+            steps {
+                sh '/usr/local/bin/security-scripts/security_scan.sh'
+            }
+        }
+
+        // ====================================================================
+        // STAGE 5: GENERATE SECURITY REPORT
+        // ====================================================================
+        stage('Generate Report') {
+            steps {
+                sh 'python3 /usr/local/bin/security-scripts/generate_report.py'
+
+                archiveArtifacts artifacts: 'security-report.pdf, summary.json',
+                               allowEmptyArchive: true
+            }
+        }
+
+        // ====================================================================
+        // STAGE 6: SEND SECURITY SCAN NOTIFICATION
+        // ====================================================================
+        stage('Notify Security Scan') {
+            steps {
+                script {
+                    def summary = readJSON file: 'summary.json'
+
+                    def scanColor = summary.risk_level == 'CRITICAL' ? 'ff0000' :
+                                   summary.risk_level == 'HIGH' ? 'ff8800' :
+                                   summary.risk_level == 'MEDIUM' ? 'ffbb00' : '00cc00'
+
+                    def scanMessage = [
+                        "@type": "MessageCard",
+                        "@context": "https://schema.org/extensions",
+                        "summary": "Security Scan Complete",
+                        "themeColor": scanColor,
+                        "title": "🔒 Security Scan Complete",
+                        "sections": [[
+                            "activityTitle": "${PROJECT_NAME}",
+                            "activitySubtitle": "Risk Level: ${summary.risk_level}",
+                            "facts": [
+                                ["name": "Risk Score", "value": "${summary.risk_score}/10"],
+                                ["name": "Critical", "value": "${summary.critical}"],
+                                ["name": "High", "value": "${summary.high}"],
+                                ["name": "Medium", "value": "${summary.medium}"],
+                                ["name": "Total Issues", "value": "${summary.total}"]
+                            ]
+                        ]],
+                        "potentialAction": [[
+                            "@type": "OpenUri",
+                            "name": "View PDF Report",
+                            "targets": [["os": "default", "uri": "${BUILD_URL}artifact/security-report.pdf"]]
+                        ]]
+                    ]
+
+                    try {
+                        httpRequest(
+                            url: "${TEAMS_WEBHOOK}",
+                            httpMode: 'POST',
+                            contentType: 'APPLICATION_JSON',
+                            requestBody: groovy.json.JsonOutput.toJson(scanMessage),
+                            validResponseCodes: '200',
+                            ignoreSslErrors: true
+                        )
+                    } catch (Exception e) {
+                        echo "Teams notification failed: ${e.message}"
+                    }
+                }
+            }
+        }
+
+        // ====================================================================
+        // STAGE 7: SONARQUBE ANALYSIS
+        // ====================================================================
+        stage('SonarQube Analysis') {
+            steps {
+                withSonarQubeEnv('SonarQube') {
+                    sh 'sonar-scanner'  // For Node.js/Angular projects
+                }
+            }
+        }
+
+        // ====================================================================
+        // STAGE 8: QUALITY GATE
+        // ====================================================================
+        stage('Quality Gate') {
+            steps {
+                timeout(time: 5, unit: 'MINUTES') {
+                    script {
+                        def qg = waitForQualityGate()
+                        if (qg.status != 'OK') {
+                            // Quality gate failed - send notification and stop
+                            def failMessage = [
+                                "@type": "MessageCard",
+                                "@context": "https://schema.org/extensions",
+                                "summary": "Quality Gate Failed",
+                                "themeColor": "ff0000",
+                                "title": "❌ Quality Gate FAILED - Deployment Stopped",
+                                "sections": [[
+                                    "activityTitle": "${PROJECT_NAME}",
+                                    "activitySubtitle": "Build #${BUILD_NUMBER}",
+                                    "facts": [
+                                        ["name": "Status", "value": qg.status],
+                                        ["name": "Action", "value": "Fix code quality issues"]
+                                    ],
+                                    "text": "Deployment has been stopped due to quality gate failure."
+                                ]]
+                            ]
+
+                            try {
+                                httpRequest(
+                                    url: "${TEAMS_WEBHOOK}",
+                                    httpMode: 'POST',
+                                    contentType: 'APPLICATION_JSON',
+                                    requestBody: groovy.json.JsonOutput.toJson(failMessage),
+                                    validResponseCodes: '200',
+                                    ignoreSslErrors: true
+                                )
+                            } catch (Exception e) {
+                                echo "Teams notification failed: ${e.message}"
+                            }
+
+                            error "Quality gate failed: ${qg.status}"
+                        }
+                    }
+                }
+            }
+        }
+
+        // ====================================================================
+        // STAGE 9: BUILD
+        // ====================================================================
+        stage('Build') {
+            steps {
+                sh 'npm install'
+                sh 'ng build --configuration production'
+            }
+        }
+
+        // ====================================================================
+        // STAGE 10: COPY TO OUTPUT
+        // ====================================================================
+        stage('Copy to Output') {
+            steps {
+                sh """
+                    mkdir -p ${OUTPUT_DIR}/build_${BUILD_NUMBER}
+                    cp -r dist/* ${OUTPUT_DIR}/build_${BUILD_NUMBER}/
+                """
+            }
+        }
+
+        // ====================================================================
+        // STAGE 11: DEPLOY TO SERVER
+        // ====================================================================
+        stage('Deploy') {
+            steps {
+                bat """
+                    python ${DEPLOY_SCRIPT} ^
+                        --action deploy-frontend ^
+                        --source ${OUTPUT_DIR}\\build_${BUILD_NUMBER} ^
+                        --component ${COMPONENT_NAME}
+                """
+
+                script {
+                    // Read deployment status
+                    def deployStatus = readJSON file: 'deployment_status.json'
+                    env.DEPLOYMENT_DURATION = deployStatus.duration_seconds
+                }
+            }
+        }
+
+        // ====================================================================
+        // STAGE 12: SEND SUCCESS NOTIFICATION
+        // ====================================================================
+        stage('Notify Success') {
+            steps {
+                script {
+                    def summary = readJSON file: 'summary.json'
+                    def deployStatus = readJSON file: 'deployment_status.json'
+
+                    // Teams notification
+                    def successMessage = [
+                        "@type": "MessageCard",
+                        "@context": "https://schema.org/extensions",
+                        "summary": "Deployment Complete",
+                        "themeColor": "00cc00",
+                        "title": "✅ Deployment Complete",
+                        "sections": [[
+                            "activityTitle": "${PROJECT_NAME}",
+                            "activitySubtitle": "Build #${BUILD_NUMBER}",
+                            "facts": [
+                                ["name": "Component", "value": "${COMPONENT_NAME}"],
+                                ["name": "Server", "value": "TTS-STG01"],
+                                ["name": "Type", "value": "Frontend (No Tomcat restart)"],
+                                ["name": "Duration", "value": "${deployStatus.duration_seconds}s"]
+                            ],
+                            "text": "Frontend deployed successfully. No manual steps required."
+                        ]]
+                    ]
+
+                    try {
+                        httpRequest(
+                            url: "${TEAMS_WEBHOOK}",
+                            httpMode: 'POST',
+                            contentType: 'APPLICATION_JSON',
+                            requestBody: groovy.json.JsonOutput.toJson(successMessage),
+                            validResponseCodes: '200',
+                            ignoreSslErrors: true
+                        )
+                    } catch (Exception e) {
+                        echo "Teams notification failed: ${e.message}"
+                    }
+
+                    // Email notification
+                    emailext(
+                        subject: "✅ ${PROJECT_NAME} Deployed - Build #${BUILD_NUMBER}",
+                        body: """
+                        <html>
+                        <body style="font-family: Arial, sans-serif;">
+                            <h2 style="color: #00cc00;">✅ ${PROJECT_NAME} Deployment Complete</h2>
+
+                            <h3>1. Deployment Info</h3>
+                            <ul>
+                                <li>Developer: ${env.GIT_AUTHOR}</li>
+                                <li>Time: ${SCAN_DATE}</li>
+                                <li>Build: #${BUILD_NUMBER}</li>
+                                <li>Duration: ${deployStatus.duration_seconds}s</li>
+                            </ul>
+
+                            <h3>2. Security Scan</h3>
+                            <ul>
+                                <li>Risk Score: ${summary.risk_score}/10 (${summary.risk_level})</li>
+                                <li>Critical: ${summary.critical}</li>
+                                <li>High: ${summary.high}</li>
+                                <li>Medium: ${summary.medium}</li>
+                                <li>Total: ${summary.total}</li>
+                            </ul>
+                            <p><a href="${BUILD_URL}artifact/security-report.pdf">Download PDF Report</a></p>
+
+                            <h3>3. Quality Gate</h3>
+                            <p style="color: green;">✅ PASSED</p>
+
+                            <h3>4. Deployment</h3>
+                            <ul>
+                                <li>Server: TTS-STG01</li>
+                                <li>Component: ${COMPONENT_NAME}</li>
+                                <li>Type: Frontend</li>
+                                <li>Backup: Created</li>
+                                <li>Tomcat: NOT RESTARTED (frontend only)</li>
+                            </ul>
+
+                            <h3>5. Status</h3>
+                            <p style="color: green;">✅ Frontend files deployed successfully. No manual steps required.</p>
+
+                            <hr>
+                            <p><a href="${BUILD_URL}">View Full Build Log</a></p>
+                        </body>
+                        </html>
+                        """,
+                        to: "${EMAIL_RECIPIENTS}",
+                        mimeType: 'text/html',
+                        attachmentsPattern: 'security-report.pdf'
+                    )
+                }
+            }
+        }
+    }
+
+    post {
+        failure {
+            script {
+                def failMessage = [
+                    "@type": "MessageCard",
+                    "@context": "https://schema.org/extensions",
+                    "summary": "Deployment Failed",
+                    "themeColor": "ff0000",
+                    "title": "❌ Deployment FAILED",
+                    "sections": [[
+                        "activityTitle": "${PROJECT_NAME}",
+                        "activitySubtitle": "Build #${BUILD_NUMBER}",
+                        "facts": [
+                            ["name": "Status", "value": "FAILED"],
+                            ["name": "Time", "value": "${SCAN_DATE}"]
+                        ]
+                    ]],
+                    "potentialAction": [[
+                        "@type": "OpenUri",
+                        "name": "View Console Log",
+                        "targets": [["os": "default", "uri": "${BUILD_URL}console"]]
+                    ]]
+                ]
+
+                try {
+                    httpRequest(
+                        url: "${TEAMS_WEBHOOK}",
+                        httpMode: 'POST',
+                        contentType: 'APPLICATION_JSON',
+                        requestBody: groovy.json.JsonOutput.toJson(failMessage),
+                        validResponseCodes: '200',
+                        ignoreSslErrors: true
+                    )
+                } catch (Exception e) {
+                    echo "Teams notification failed: ${e.message}"
+                }
+
+                emailext(
+                    subject: "❌ ${PROJECT_NAME} Deployment FAILED - Build #${BUILD_NUMBER}",
+                    body: """
+                    <html>
+                    <body>
+                        <h2 style="color: red;">❌ Deployment Failed</h2>
+                        <p>${PROJECT_NAME} deployment failed.</p>
+                        <ul>
+                            <li>Build: #${BUILD_NUMBER}</li>
+                            <li>Time: ${SCAN_DATE}</li>
+                        </ul>
+                        <p><a href="${BUILD_URL}console">View Console Output</a></p>
+                    </body>
+                    </html>
+                    """,
+                    to: "${EMAIL_RECIPIENTS}",
+                    mimeType: 'text/html'
+                )
+            }
+        }
+    }
+}

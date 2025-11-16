@@ -1,0 +1,32 @@
+# Jenkins data
+jenkins_home/
+
+# SonarQube data
+sonarqube_data/
+sonarqube_extensions/
+sonarqube_logs/
+postgresql_data/
+
+# Security reports (generated during builds)
+security-reports/
+*.pdf
+summary.json
+deployment_status.json
+
+# Build artifacts
+target/
+dist/
+node_modules/
+build/
+
+# IDE
+.vscode/
+.idea/
+*.iml
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
