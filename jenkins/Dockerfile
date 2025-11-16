@@ -187,9 +187,7 @@ RUN echo "=== SECURITY TOOLS ===" && \
     echo "" && \
     echo "=== ALL TOOLS INSTALLED SUCCESSFULLY ===" && \
     echo "" && \
-    echo "JAVA VERSIONS AVAILABLE:" && \
-    bash -c "source /var/jenkins_home/.sdkman/bin/sdkman-init.sh && sdk list java | grep installed" && \
-    echo "" && \
+    echo "JAVA VERSIONS: Java 8 (8.0.432-tem) + Java 17 (17.0.13-tem)" && \
     echo "SWITCH JAVA: source /var/jenkins_home/switch-java.sh [8|17]"
 
 # ============================================================================
