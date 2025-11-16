@@ -1,6 +1,6 @@
 services:
   # ============================================================================
-  # JENKINS - CI/CD Server
+  # JENKINS - CI/CD Server (Lightweight - Security Tools Only)
   # ============================================================================
   jenkins:
     build:
@@ -15,8 +15,8 @@ services:
       - "50001:50001"    # Jenkins Agent Port
     volumes:
       - jenkins_home:/var/jenkins_home
-      - /tts/ttsbuild:/tts/ttsbuild
-      - /tts/outputttsbuild:/tts/outputttsbuild
+      - /tts/ttsbuild:/tts/ttsbuild                      # Mount code folders (read/scan)
+      - /tts/outputttsbuild:/tts/outputttsbuild          # Mount output folder (write artifacts)
     environment:
       - JENKINS_OPTS=--httpPort=8080
       - JENKINS_SLAVE_AGENT_PORT=50001
@@ -38,6 +38,7 @@ services:
       - SONAR_JDBC_USERNAME=sonar
       - SONAR_JDBC_PASSWORD=sonar
     volumes:
+      - /tts/ttsbuild:/tts/ttsbuild                      # Mount code folders (for scanning)
       - sonarqube_data:/opt/sonarqube/data
       - sonarqube_extensions:/opt/sonarqube/extensions
       - sonarqube_logs:/opt/sonarqube/logs

@@ -1,12 +1,13 @@
 # ============================================================================
-# JENKINS DOCKERFILE - Build Server with Security Tools
+# JENKINS DOCKERFILE - Lightweight with Security Tools Only
 # ============================================================================
-# This custom Jenkins image includes:
-# - Node.js 18 + Angular CLI (for frontend builds)
-# - Maven 3.9 (for backend Java builds)
-# - Python 3 with PDF generation libraries
+# This Jenkins image is LIGHTWEIGHT and contains ONLY:
 # - Security scanning tools: Semgrep, Trivy, TruffleHog
-# - Git, Docker CLI, and other build tools
+# - Python 3 with PDF generation libraries
+# - SSH client for executing commands on host
+#
+# Build tools (Node.js, Maven, Java) are NOT included.
+# They are used from the HOST system via SSH.
 # ============================================================================
 
 FROM jenkins/jenkins:lts
@@ -22,33 +23,13 @@ RUN apt-get update && apt-get install -y \
     wget \
     git \
     vim \
-    unzip \
+    openssh-client \
+    jq \
     apt-transport-https \
     ca-certificates \
     gnupg \
     lsb-release \
     && rm -rf /var/lib/apt/lists/*
-
-# ============================================================================
-# NODE.JS 18 + NPM + ANGULAR CLI
-# ============================================================================
-RUN curl -fsSL https://deb.nodesource.com/setup_18.x | bash - \
-    && apt-get install -y nodejs \
-    && npm install -g @angular/cli@latest \
-    && npm --version \
-    && node --version \
-    && ng version
-
-# ============================================================================
-# MAVEN 3.9
-# ============================================================================
-RUN wget https://dlcdn.apache.org/maven/maven-3/3.9.6/binaries/apache-maven-3.9.6-bin.tar.gz \
-    && tar -xzf apache-maven-3.9.6-bin.tar.gz -C /opt \
-    && ln -s /opt/apache-maven-3.9.6 /opt/maven \
-    && rm apache-maven-3.9.6-bin.tar.gz
-
-ENV MAVEN_HOME=/opt/maven
-ENV PATH="${MAVEN_HOME}/bin:${PATH}"
 
 # ============================================================================
 # PYTHON 3 + LIBRARIES FOR PDF GENERATION
@@ -59,8 +40,6 @@ RUN apt-get update && apt-get install -y \
     && pip3 install --no-cache-dir \
         reportlab==4.0.7 \
         Pillow==10.1.0 \
-        matplotlib==3.8.2 \
-        pandas==2.1.4 \
         requests==2.31.0 \
     && python3 --version
 
@@ -119,15 +98,15 @@ USER jenkins
 # ============================================================================
 # VERIFY INSTALLATIONS
 # ============================================================================
-RUN echo "=== Build Tools ===" \
-    && node --version \
-    && npm --version \
-    && ng version \
-    && mvn --version \
-    && echo "=== Security Tools ===" \
+RUN echo "=== Security Tools ===" \
     && semgrep --version \
     && trivy --version \
     && trufflehog --version \
     && echo "=== Python ===" \
     && python3 --version \
-    && echo "=== All tools installed successfully ==="
+    && echo "=== SSH Client ===" \
+    && ssh -V \
+    && echo "=== All tools installed successfully ===" \
+    && echo "" \
+    && echo "NOTE: Build tools (Node.js, Maven, Java) are NOT installed." \
+    && echo "      They will be used from the HOST system via SSH."

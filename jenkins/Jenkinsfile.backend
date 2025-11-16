@@ -1,17 +1,25 @@
 // ============================================================================
 // ADXSIP BACKEND DEPLOYMENT PIPELINE
 // ============================================================================
-// This pipeline:
-// 1. Runs security scans (Semgrep, Trivy, TruffleHog)
-// 2. Sends Teams notification with scan results
-// 3. Runs SonarQube quality gate
-// 4. Builds Java WAR file with Maven
-// 5. Deploys to Windows server via Jenkins agent
-// 6. Sends deployment notifications (Teams + Email)
+// Architecture:
+// - Jenkins in Docker (security tools, Python, SonarQube)
+// - Code on HOST at /tts/ttsbuild/ADXSIP/ADX-SIP/
+// - Build tools on HOST (Maven, Java)
+// - Jenkins executes commands on HOST via SSH
+// - Jenkins scans mounted host folders
+//
+// Flow:
+// 1. Git pull on host
+// 2. Security scan (Semgrep, Trivy, TruffleHog) - scan mounted folder
+// 3. SonarQube analysis
+// 4. Quality gate
+// 5. Maven build on host
+// 6. Copy artifacts to output folder
+// 7. Windows agent deploys
 // ============================================================================
 
 pipeline {
-    agent { label 'UAE_tomcat' }  // Windows agent on TTS-STG01
+    agent any
 
     environment {
         // ====================================================================
@@ -19,8 +27,19 @@ pipeline {
         // ====================================================================
         PROJECT_NAME = 'ADXSIP Backend'
         COMPONENT_NAME = 'ADXSIP'
+
+        // GitHub repository (for reference only, git pull happens on host)
         GITHUB_URL = 'https://github.com/TTS-FZLLC/adxsip-backend'
         GITHUB_BRANCH = 'main'
+
+        // HOST paths (where code actually lives)
+        HOST_USER = 'ttsbuild'
+        HOST_CODE_PATH = '/tts/ttsbuild/ADXSIP/ADX-SIP'
+        HOST_OUTPUT_PATH = '/tts/outputttsbuild/ADXSIP'
+
+        // MOUNTED paths (inside Jenkins container)
+        MOUNTED_CODE_PATH = '/tts/ttsbuild/ADXSIP/ADX-SIP'
+        MOUNTED_OUTPUT_PATH = '/tts/outputttsbuild/ADXSIP'
 
         // Teams webhook URL
         TEAMS_WEBHOOK = 'YOUR_TEAMS_WEBHOOK_URL_HERE'
@@ -28,9 +47,8 @@ pipeline {
         // Email recipients
         EMAIL_RECIPIENTS = 'kannan.giridharan@ttsme.com'
 
-        // Deployment paths
+        // Deployment script on Windows server
         DEPLOY_SCRIPT = 'C:\\TTS\\REManagement\\UAE\\SIP-NEW\\jenkins\\deploy.py'
-        OUTPUT_DIR = 'C:\\TTS\\outputttsbuild\\ADXSIP'
 
         // ====================================================================
         // AUTO-GENERATED VALUES
@@ -55,7 +73,7 @@ pipeline {
                             "activityTitle": "${PROJECT_NAME}",
                             "activitySubtitle": "Build #${BUILD_NUMBER}",
                             "facts": [
-                                ["name": "Developer", "value": "${env.GIT_AUTHOR ?: 'Jenkins'}"],
+                                ["name": "Component", "value": "${COMPONENT_NAME}"],
                                 ["name": "Branch", "value": "${GITHUB_BRANCH}"],
                                 ["name": "Status", "value": "IN PROGRESS"]
                             ]
@@ -71,66 +89,69 @@ pipeline {
                             validResponseCodes: '200',
                             ignoreSslErrors: true
                         )
+                        echo "✅ Start notification sent to Teams"
                     } catch (Exception e) {
-                        echo "Teams notification failed: ${e.message}"
+                        echo "⚠️ Teams notification failed: ${e.message}"
                     }
                 }
             }
         }
 
         // ====================================================================
-        // STAGE 2: CHECKOUT CODE
+        // STAGE 2: UPDATE CODE ON HOST
         // ====================================================================
-        stage('Checkout') {
+        stage('Update Code') {
             steps {
-                git branch: "${GITHUB_BRANCH}",
-                    credentialsId: 'github-pat',
-                    url: "${GITHUB_URL}"
-
-                script {
-                    env.GIT_COMMIT_SHORT = sh(script: "git rev-parse --short HEAD || echo 'unknown'", returnStdout: true).trim()
-                    env.GIT_AUTHOR = sh(script: "git log -1 --pretty=%an || echo 'Jenkins'", returnStdout: true).trim()
+                echo "Updating code on host via SSH..."
+                sshagent(['localhost-ssh']) {
+                    sh """
+                        ssh -o StrictHostKeyChecking=no ${HOST_USER}@host.docker.internal \
+                        "cd ${HOST_CODE_PATH} && git pull origin ${GITHUB_BRANCH}"
+                    """
                 }
+                echo "✅ Code updated on host"
             }
         }
 
         // ====================================================================
-        // STAGE 3: CLEAN WORKSPACE
-        // ====================================================================
-        stage('Clean Workspace') {
-            steps {
-                sh 'git clean -fdx'
-            }
-        }
-
-        // ====================================================================
-        // STAGE 4: SECURITY SCANS
+        // STAGE 3: SECURITY SCANS
         // ====================================================================
         stage('Security Scans') {
             steps {
-                sh '/usr/local/bin/security-scripts/security_scan.sh'
+                echo "Running security scans on mounted host folder..."
+                sh """
+                    cd ${MOUNTED_CODE_PATH}
+                    /usr/local/bin/security-scripts/security_scan.sh
+                """
+                echo "✅ Security scans complete"
             }
         }
 
         // ====================================================================
-        // STAGE 5: GENERATE SECURITY REPORT
+        // STAGE 4: GENERATE SECURITY REPORT
         // ====================================================================
         stage('Generate Report') {
             steps {
-                sh 'python3 /usr/local/bin/security-scripts/generate_report.py'
+                echo "Generating PDF security report..."
+                sh """
+                    cd ${MOUNTED_CODE_PATH}
+                    python3 /usr/local/bin/security-scripts/generate_report.py
+                """
 
                 archiveArtifacts artifacts: 'security-report.pdf, summary.json',
                                allowEmptyArchive: true
+
+                echo "✅ Security report generated"
             }
         }
 
         // ====================================================================
-        // STAGE 6: SEND SECURITY SCAN NOTIFICATION
+        // STAGE 5: SEND SECURITY SCAN NOTIFICATION
         // ====================================================================
         stage('Notify Security Scan') {
             steps {
                 script {
-                    def summary = readJSON file: 'summary.json'
+                    def summary = readJSON file: "${MOUNTED_CODE_PATH}/summary.json"
 
                     def scanColor = summary.risk_level == 'CRITICAL' ? 'ff0000' :
                                    summary.risk_level == 'HIGH' ? 'ff8800' :
@@ -169,26 +190,32 @@ pipeline {
                             validResponseCodes: '200',
                             ignoreSslErrors: true
                         )
+                        echo "✅ Security scan notification sent to Teams"
                     } catch (Exception e) {
-                        echo "Teams notification failed: ${e.message}"
+                        echo "⚠️ Teams notification failed: ${e.message}"
                     }
                 }
             }
         }
 
         // ====================================================================
-        // STAGE 7: SONARQUBE ANALYSIS
+        // STAGE 6: SONARQUBE ANALYSIS
         // ====================================================================
         stage('SonarQube Analysis') {
             steps {
-                withSonarQubeEnv('SonarQube') {
-                    sh 'mvn sonar:sonar'
+                echo "Running SonarQube analysis on host..."
+                sshagent(['localhost-ssh']) {
+                    sh """
+                        ssh -o StrictHostKeyChecking=no ${HOST_USER}@host.docker.internal \
+                        "cd ${HOST_CODE_PATH} && mvn sonar:sonar"
+                    """
                 }
+                echo "✅ SonarQube analysis complete"
             }
         }
 
         // ====================================================================
-        // STAGE 8: QUALITY GATE
+        // STAGE 7: QUALITY GATE
         // ====================================================================
         stage('Quality Gate') {
             steps {
@@ -196,7 +223,9 @@ pipeline {
                     script {
                         def qg = waitForQualityGate()
                         if (qg.status != 'OK') {
-                            // Quality gate failed - send notification and stop
+                            echo "❌ Quality gate failed: ${qg.status}"
+
+                            // Send failure notification
                             def failMessage = [
                                 "@type": "MessageCard",
                                 "@context": "https://schema.org/extensions",
@@ -224,66 +253,87 @@ pipeline {
                                     ignoreSslErrors: true
                                 )
                             } catch (Exception e) {
-                                echo "Teams notification failed: ${e.message}"
+                                echo "⚠️ Teams notification failed: ${e.message}"
                             }
 
                             error "Quality gate failed: ${qg.status}"
                         }
+                        echo "✅ Quality gate passed"
                     }
                 }
             }
         }
 
         // ====================================================================
-        // STAGE 9: BUILD
+        // STAGE 8: BUILD ON HOST
         // ====================================================================
         stage('Build') {
             steps {
-                sh 'mvn clean install -DskipTests'
+                echo "Building with Maven on host..."
+                sshagent(['localhost-ssh']) {
+                    sh """
+                        ssh -o StrictHostKeyChecking=no ${HOST_USER}@host.docker.internal \
+                        "cd ${HOST_CODE_PATH} && mvn clean install -DskipTests"
+                    """
+                }
+                echo "✅ Build complete"
             }
         }
 
         // ====================================================================
-        // STAGE 10: COPY TO OUTPUT
+        // STAGE 9: COPY TO OUTPUT FOLDER
         // ====================================================================
         stage('Copy to Output') {
             steps {
+                echo "Copying WAR file to output folder..."
                 sh """
-                    mkdir -p ${OUTPUT_DIR}
-                    cp target/*.war ${OUTPUT_DIR}/${COMPONENT_NAME}_${BUILD_NUMBER}.war
+                    mkdir -p ${MOUNTED_OUTPUT_PATH}
+                    cp ${MOUNTED_CODE_PATH}/target/*.war ${MOUNTED_OUTPUT_PATH}/${COMPONENT_NAME}_${BUILD_NUMBER}.war
                 """
+                echo "✅ WAR file copied to ${MOUNTED_OUTPUT_PATH}/${COMPONENT_NAME}_${BUILD_NUMBER}.war"
             }
         }
 
         // ====================================================================
-        // STAGE 11: DEPLOY TO SERVER
+        // STAGE 10: DEPLOY TO WINDOWS SERVER
         // ====================================================================
         stage('Deploy') {
+            agent { label 'UAE_tomcat' }  // Switch to Windows agent
+
             steps {
+                echo "Deploying to Windows server..."
                 bat """
                     python ${DEPLOY_SCRIPT} ^
                         --action deploy-backend ^
-                        --war ${OUTPUT_DIR}\\${COMPONENT_NAME}_${BUILD_NUMBER}.war ^
+                        --war ${MOUNTED_OUTPUT_PATH}\\${COMPONENT_NAME}_${BUILD_NUMBER}.war ^
                         --component ${COMPONENT_NAME}
                 """
 
                 script {
                     // Read deployment status
-                    def deployStatus = readJSON file: 'deployment_status.json'
-                    env.DEPLOYMENT_DURATION = deployStatus.duration_seconds
-                    env.HEALTH_CHECK = deployStatus.health_check
+                    if (fileExists('deployment_status.json')) {
+                        def deployStatus = readJSON file: 'deployment_status.json'
+                        env.DEPLOYMENT_DURATION = deployStatus.duration_seconds
+                        env.HEALTH_CHECK = deployStatus.health_check
+                        env.TOMCAT_PID = deployStatus.tomcat_pid ?: 'N/A'
+                    } else {
+                        env.DEPLOYMENT_DURATION = 'N/A'
+                        env.HEALTH_CHECK = 'Status file not found'
+                        env.TOMCAT_PID = 'N/A'
+                    }
                 }
+
+                echo "✅ Deployment complete"
             }
         }
 
         // ====================================================================
-        // STAGE 12: SEND SUCCESS NOTIFICATION
+        // STAGE 11: SEND SUCCESS NOTIFICATION
         // ====================================================================
         stage('Notify Success') {
             steps {
                 script {
-                    def summary = readJSON file: 'summary.json'
-                    def deployStatus = readJSON file: 'deployment_status.json'
+                    def summary = readJSON file: "${MOUNTED_CODE_PATH}/summary.json"
 
                     // Teams notification
                     def successMessage = [
@@ -298,8 +348,9 @@ pipeline {
                             "facts": [
                                 ["name": "Component", "value": "${COMPONENT_NAME}"],
                                 ["name": "Server", "value": "TTS-STG01"],
-                                ["name": "Health Check", "value": "${deployStatus.health_check}"],
-                                ["name": "Duration", "value": "${deployStatus.duration_seconds}s"]
+                                ["name": "Health Check", "value": "${env.HEALTH_CHECK}"],
+                                ["name": "Tomcat PID", "value": "${env.TOMCAT_PID}"],
+                                ["name": "Duration", "value": "${env.DEPLOYMENT_DURATION}s"]
                             ],
                             "text": "⚠️ Manually start background processes when ready"
                         ]]
@@ -314,8 +365,9 @@ pipeline {
                             validResponseCodes: '200',
                             ignoreSslErrors: true
                         )
+                        echo "✅ Success notification sent to Teams"
                     } catch (Exception e) {
-                        echo "Teams notification failed: ${e.message}"
+                        echo "⚠️ Teams notification failed: ${e.message}"
                     }
 
                     // Email notification
@@ -328,10 +380,10 @@ pipeline {
 
                             <h3>1. Deployment Info</h3>
                             <ul>
-                                <li>Developer: ${env.GIT_AUTHOR}</li>
                                 <li>Time: ${SCAN_DATE}</li>
                                 <li>Build: #${BUILD_NUMBER}</li>
-                                <li>Duration: ${deployStatus.duration_seconds}s</li>
+                                <li>Component: ${COMPONENT_NAME}</li>
+                                <li>Duration: ${env.DEPLOYMENT_DURATION}s</li>
                             </ul>
 
                             <h3>2. Security Scan</h3>
@@ -349,14 +401,14 @@ pipeline {
 
                             <h3>4. Deployment</h3>
                             <ul>
-                                <li>Server: TTS-STG01</li>
+                                <li>Server: TTS-STG01 (192.168.1.142)</li>
                                 <li>Component: ${COMPONENT_NAME}</li>
                                 <li>Backup: Created</li>
-                                <li>Tomcat: Restarted ✅</li>
+                                <li>Tomcat: Restarted ✅ (PID: ${env.TOMCAT_PID})</li>
                             </ul>
 
                             <h3>5. Health Check</h3>
-                            <p>${deployStatus.health_check}</p>
+                            <p>${env.HEALTH_CHECK}</p>
 
                             <h3>6. Next Steps</h3>
                             <p style="background: #fff3cd; padding: 10px; border-left: 4px solid #ffbb00;">
@@ -373,6 +425,8 @@ pipeline {
                         mimeType: 'text/html',
                         attachmentsPattern: 'security-report.pdf'
                     )
+
+                    echo "✅ Email notification sent"
                 }
             }
         }
@@ -412,7 +466,7 @@ pipeline {
                         ignoreSslErrors: true
                     )
                 } catch (Exception e) {
-                    echo "Teams notification failed: ${e.message}"
+                    echo "⚠️ Teams notification failed: ${e.message}"
                 }
 
                 emailext(
