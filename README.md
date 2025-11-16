@@ -187,15 +187,23 @@ docker exec jenkins-master cat /var/jenkins_home/secrets/initialAdminPassword
 
 ### 2. Install Additional Plugins
 
-Go to **Manage Jenkins → Plugins → Available**
+📋 **See [JENKINS_PLUGINS.md](JENKINS_PLUGINS.md) for complete plugin list**
 
-Install:
+Go to **Manage Jenkins → Plugins → Available plugins**
+
+**Required Plugins** (install these):
 - Email Extension Plugin
 - HTTP Request Plugin
-- SonarQube Scanner Plugin
+- SonarQube Scanner for Jenkins
 - SSH Agent Plugin
+- Pipeline Utility Steps
+- Config File Provider Plugin
 
-Restart Jenkins after installation.
+**Optional but Recommended**:
+- Blue Ocean (modern UI)
+- AnsiColor (colorized logs)
+
+After installing, check **"Restart Jenkins when installation is complete"**.
 
 ### 3. Configure SSH Credentials
 

@@ -24,10 +24,10 @@ services:
       - devops-net
 
   # ============================================================================
-  # SONARQUBE - Code Quality & Security Analysis
+  # SONARQUBE - Code Quality & Security Analysis (LATEST VERSION)
   # ============================================================================
   sonarqube:
-    image: sonarqube:lts-community
+    image: sonarqube:community
     container_name: sonarqube
     restart: unless-stopped
     ports:
@@ -48,10 +48,10 @@ services:
       - sonarqube-db
 
   # ============================================================================
-  # POSTGRESQL - SonarQube Database
+  # POSTGRESQL - SonarQube Database (LATEST VERSION)
   # ============================================================================
   sonarqube-db:
-    image: postgres:15
+    image: postgres:16
     container_name: sonarqube-db
     restart: unless-stopped
     environment:
