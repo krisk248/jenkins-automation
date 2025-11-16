@@ -37,7 +37,7 @@ RUN apt-get update && apt-get install -y \
 RUN apt-get update && apt-get install -y \
     python3 \
     python3-pip \
-    && pip3 install --no-cache-dir \
+    && pip3 install --break-system-packages --no-cache-dir \
         reportlab==4.0.7 \
         Pillow==10.1.0 \
         requests==2.31.0 \
@@ -46,7 +46,7 @@ RUN apt-get update && apt-get install -y \
 # ============================================================================
 # SEMGREP - Static Application Security Testing (SAST)
 # ============================================================================
-RUN pip3 install --no-cache-dir semgrep==1.52.0 \
+RUN pip3 install --break-system-packages --no-cache-dir semgrep==1.52.0 \
     && semgrep --version
 
 # ============================================================================
