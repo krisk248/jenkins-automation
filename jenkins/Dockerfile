@@ -37,16 +37,20 @@ RUN apt-get update && apt-get install -y \
 RUN apt-get update && apt-get install -y \
     python3 \
     python3-pip \
+    python3-dev \
+    build-essential \
+    libjpeg-dev \
+    zlib1g-dev \
     && pip3 install --break-system-packages --no-cache-dir \
-        reportlab==4.0.7 \
-        Pillow==10.1.0 \
-        requests==2.31.0 \
+        reportlab \
+        Pillow \
+        requests \
     && python3 --version
 
 # ============================================================================
 # SEMGREP - Static Application Security Testing (SAST)
 # ============================================================================
-RUN pip3 install --break-system-packages --no-cache-dir semgrep==1.52.0 \
+RUN pip3 install --break-system-packages --no-cache-dir semgrep \
     && semgrep --version
 
 # ============================================================================
