@@ -79,12 +79,12 @@ RUN wget https://github.com/trufflesecurity/trufflehog/releases/download/v3.63.7
 # ============================================================================
 # COPY CUSTOM SCRIPTS AND TEMPLATES
 # ============================================================================
-# Copy security scanning script
-COPY scripts/security_scan.sh /usr/local/bin/security-scripts/security_scan.sh
-RUN chmod +x /usr/local/bin/security-scripts/security_scan.sh
+# Copy NEW Python security scanning script
+COPY security-scripts/security_scan.py /usr/local/bin/security-scripts/security_scan.py
+RUN chmod +x /usr/local/bin/security-scripts/security_scan.py
 
-# Copy PDF report generator
-COPY scripts/generate_report.py /usr/local/bin/security-scripts/generate_report.py
+# Copy NEW Python PDF report generator
+COPY security-scripts/generate_report.py /usr/local/bin/security-scripts/generate_report.py
 RUN chmod +x /usr/local/bin/security-scripts/generate_report.py
 
 # Copy email template
