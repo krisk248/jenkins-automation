@@ -79,21 +79,36 @@ RUN wget https://github.com/trufflesecurity/trufflehog/releases/download/v3.63.7
 # ============================================================================
 # COPY CUSTOM SCRIPTS AND TEMPLATES
 # ============================================================================
-# Copy NEW Python security scanning script
-COPY security-scripts/security_scan.py /usr/local/bin/security-scripts/security_scan.py
+# Switch to root to create directories and copy files
+USER root
+
+# Create security scripts directory
+RUN mkdir -p /usr/local/bin/security-scripts && \
+    mkdir -p /usr/local/bin/security-templates && \
+    chmod 755 /usr/local/bin/security-scripts && \
+    chmod 755 /usr/local/bin/security-templates
+
+# Copy Python security scanning script
+COPY scripts/security_scan.py /usr/local/bin/security-scripts/security_scan.py
 RUN chmod +x /usr/local/bin/security-scripts/security_scan.py
 
-# Copy NEW Python PDF report generator
-COPY security-scripts/generate_report.py /usr/local/bin/security-scripts/generate_report.py
+# Copy Python PDF report generator
+COPY scripts/generate_report.py /usr/local/bin/security-scripts/generate_report.py
 RUN chmod +x /usr/local/bin/security-scripts/generate_report.py
+
+# Copy TTS logo for PDF reports
+COPY scripts/logo.png /usr/local/bin/security-scripts/logo.png
+RUN chmod 644 /usr/local/bin/security-scripts/logo.png
 
 # Copy email template
 COPY templates/email_template.html /usr/local/bin/security-templates/email_template.html
 
+# Switch back to jenkins user for SDK installations
+USER jenkins
+
 # ============================================================================
 # SWITCH TO JENKINS USER FOR USER-LEVEL INSTALLATIONS
 # ============================================================================
-USER jenkins
 
 # ============================================================================
 # SDKMAN - Java & Maven Version Manager
